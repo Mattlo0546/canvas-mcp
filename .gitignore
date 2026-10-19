@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.canvas-mcp/
+uv.lock
+build/

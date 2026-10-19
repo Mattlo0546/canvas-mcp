@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canvas-mcp"
+version = "0.1.0"
+description = "MCP server for Canvas LMS (Instructure): courses, modules, deadlines, announcements and lecture-slide download, with university SSO sign-in (Oxford by default)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+keywords = ["mcp", "model-context-protocol", "canvas", "canvas-lms", "instructure", "lms", "claude", "university", "oxford", "students"]
+dependencies = [
+    "mcp>=1.10,<2",  # FastMCP API; mcp 2.x renamed it
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "playwright>=1.45",
+]
+
+[project.urls]
+Homepage = "https://github.com/Mattlo0546/canvas-mcp"
+Issues = "https://github.com/Mattlo0546/canvas-mcp/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+canvas-mcp = "canvas_mcp.cli:main"
+
+[tool.setuptools]
+packages = ["canvas_mcp"]

@@ -1,0 +1,19 @@
+# canvas-mcp
+
+> Open-source MCP (Model Context Protocol) server for Canvas LMS by Instructure. It gives AI assistants (Claude Desktop, Claude Code, ChatGPT Codex CLI, Cursor, VS Code, SlideMate) read-only access to a student's Canvas courses, modules, deadlines and announcements, and downloads lecture slides. Signs in through university SSO + MFA in a browser, so no Canvas API token is needed. Defaults to the University of Oxford (canvas.ox.ac.uk); any Canvas site works via CANVAS_BASE_URL. Python, MIT licence.
+
+## Docs
+- [README](https://github.com/Mattlo0546/canvas-mcp/blob/main/README.md): install, client configs, tools, universities, FAQ
+
+## Tools
+- canvas_login: browser SSO sign-in (silent refresh first)
+- canvas_status, canvas_courses, canvas_browse (modules, files, assignments), canvas_deadlines (planner, submission status), canvas_announcements
+- canvas_download, canvas_sync / canvas_sync_status (PDFs from every current course into <course>/<module>/)
+
+## Install
+- `uv tool install --managed-python https://github.com/Mattlo0546/canvas-mcp/archive/refs/heads/main.zip`, then `CANVAS_BASE_URL=<your canvas> canvas-mcp login`; run with `canvas-mcp serve` (stdio)
+
+## Related
+- [moodle-mcp](https://github.com/Mattlo0546/moodle-mcp): Moodle (UCL, King's College London KEATS, LSE, Cambridge, Warwick)
+- [blackboard-mcp](https://github.com/Mattlo0546/blackboard-mcp): Blackboard Learn Ultra (Imperial, Edinburgh, Bristol, Leeds)
+- [SlideMate](https://github.com/Mattlo0546/slidemate): Mac app that installs these in one click
