@@ -33,7 +33,8 @@ deadlines and announcements. It can also **download every course's lecture slide
 | --- | --- |
 | `canvas_login` | Opens a browser window for university SSO + MFA and saves the session. It tries a silent refresh first. |
 | `canvas_status` | Which site you're on, who you're signed in as, and where files download to |
-| `canvas_courses` | Your current courses, with their term |
+| `canvas_courses` | Your current courses, with their term, and whether a full sync pulls each one |
+| `canvas_set_courses` | Change which courses a full sync pulls (`include` an info site it skips, `exclude` a course) |
 | `canvas_browse` | A course's modules: files, pages, links and assignments with due dates |
 | `canvas_deadlines` | Assignments, quizzes and discussions due in the next N days, with submission status |
 | `canvas_announcements` | Recent announcements in one course, or in all of them |
@@ -43,6 +44,12 @@ deadlines and announcements. It can also **download every course's lecture slide
 Courses can be named loosely: `"PPE101"`, `"philosophy"` or the course id all work. A sync files things as
 `<course code>/<module name>/<file>`. It skips past courses and files you already have, and it still finds module
 files in courses that hide the Files tab from students.
+
+A full sync also skips what isn't for studying: sites that aren't courses (guidance hubs, study-skills sites,
+year-group noticeboards) and, inside courses, posters, handbooks, forms, timetables and modules like "Student
+support". Its report lists the sites it skipped; `canvas_set_courses` brings one back. Words that are also lecture
+topics only count in an admin phrase, so "Mathematical induction" stays and "Induction week schedule" goes
+([`relevance.py`](canvas_mcp/relevance.py)).
 
 ## Install
 

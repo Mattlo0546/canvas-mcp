@@ -1,6 +1,7 @@
 """MCP server exposing a Canvas LMS site (Oxford by default) to AI assistants."""
 from __future__ import annotations
 
+import json
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 import anyio
 from mcp.server.fastmcp import FastMCP
 
+from . import relevance
 from .auth import browser_login
 from .canvas import Canvas, CanvasError, LoginRequired
 from .config import load_settings
@@ -20,7 +22,8 @@ mcp = FastMCP(
         "canvas_courses lists current courses; canvas_browse shows a course's modules with files, pages and "
         "assignments; canvas_deadlines lists what's due soon; canvas_announcements shows recent course announcements; "
         "canvas_download / canvas_sync save files locally (canvas_sync with no course pulls every current course's "
-        "PDFs in the background; check canvas_sync_status). If a tool reports that sign-in is needed, call "
+        "PDFs in the background, skipping guidance sites, posters and forms; check canvas_sync_status; "
+        "canvas_set_courses changes which courses it pulls). If a tool reports that sign-in is needed, call "
         "canvas_login, which opens a browser window for the university SSO + MFA."
     ),
 )
@@ -135,14 +138,63 @@ async def canvas_status() -> dict:
     return await _run(go)
 
 
+def _prefs_path() -> Path:
+    return _settings.home / "courses.json"
+
+
+def _prefs() -> dict:
+    try:
+        return json.loads(_prefs_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _info(c: dict) -> dict:
+    """The fields relevance.choose looks at."""
+    return {"id": c["id"], "name": c.get("name") or "", "shortname": c.get("course_code") or "",
+            "idnumber": c.get("sis_course_id") or "", "students": c.get("total_students") or 0, "raw": c}
+
+
+def _choose(courses: list[dict]) -> tuple[list[dict], list[dict]]:
+    keep, skipped = relevance.choose([_info(c) for c in courses], _prefs())
+    return [k["raw"] for k in keep], skipped
+
+
 @mcp.tool()
 async def canvas_courses(include_past: bool = False) -> list[dict] | dict:
-    """List the user's Canvas courses (current ones, unless include_past)."""
+    """List the user's Canvas courses (current ones, unless include_past). `synced` says whether a full canvas_sync
+    pulls it; `why_not` explains a course it skips (an info site, ended, or turned off)."""
     def go(cv: Canvas):
         now = datetime.now(timezone.utc)
+        cs = cv.courses()
+        _, skipped = _choose([c for c in cs if _current(c, now)])
+        why = {s["id"]: s["why"] for s in skipped}
         return [{"id": c["id"], "code": c.get("course_code"), "name": c.get("name"),
-                 "term": (c.get("term") or {}).get("name"), "url": f"{_settings.base_url}/courses/{c['id']}"}
-                for c in cv.courses() if include_past or _current(c, now)]
+                 "term": (c.get("term") or {}).get("name"), "url": f"{_settings.base_url}/courses/{c['id']}",
+                 "synced": _current(c, now) and c["id"] not in why,
+                 "why_not": why.get(c["id"]) or ("" if _current(c, now) else "ended")}
+                for c in cs if include_past or _current(c, now)]
+    return await _run(go)
+
+
+@mcp.tool()
+async def canvas_set_courses(include: list[str] | None = None, exclude: list[str] | None = None) -> dict:
+    """Choose which courses a full canvas_sync pulls, overriding its guess. `include`: course ids (or codes or
+    names) to pull even though they look like an info site; `exclude`: ones to stop pulling. Saved for every later
+    sync. Passing a course in one list removes it from the other."""
+    def go(cv: Canvas):
+        prefs = _prefs()
+        inc, exc = set(map(str, prefs.get("include") or [])), set(map(str, prefs.get("exclude") or []))
+        for q in include or []:
+            cid = str(cv.find_course(q)["id"])
+            inc.add(cid)
+            exc.discard(cid)
+        for q in exclude or []:
+            cid = str(cv.find_course(q)["id"])
+            exc.add(cid)
+            inc.discard(cid)
+        _prefs_path().write_text(json.dumps({"include": sorted(inc), "exclude": sorted(exc)}, indent=1))
+        return {"ok": True, "include": sorted(inc), "exclude": sorted(exc)}
     return await _run(go)
 
 
@@ -218,9 +270,11 @@ async def canvas_download(course: str, file_id: int, subdir: str = "") -> dict:
     return await _run(go)
 
 
-def _course_files(cv: Canvas, c: dict) -> list[tuple[dict, str]]:
+def _course_files(cv: Canvas, c: dict, study_only: bool = False) -> tuple[list[tuple[dict, str]], int]:
     """(file, folder inside the course) pairs: files linked from modules, filed under the module's name, then anything
-    else in the course's Files area (when students can see it), filed under its folder."""
+    else in the course's Files area (when students can see it), filed under its folder. With `study_only`, leaves out
+    admin modules and folders ("Student support") and files that aren't for studying (posters, handbooks, forms),
+    and also returns how many such files it left out."""
     by_id: dict[int, dict] = {}
     folders: dict[int, str] = {}
     try:
@@ -228,24 +282,39 @@ def _course_files(cv: Canvas, c: dict) -> list[tuple[dict, str]]:
         folders = cv.folders(c["id"])
     except CanvasError:
         pass  # Files hidden from students: fetch each module file by id instead
-    out, seen = [], set()
+    out, seen, noise = [], set(), 0
     for m in cv.modules(c["id"]):
+        admin = study_only and not relevance.is_study_section(m.get("name"))
         for it in m.get("items") or []:
             fid = it.get("content_id")
             if it.get("type") != "File" or not fid or fid in seen:
                 continue
             seen.add(fid)
+            if admin:
+                continue
+            if study_only and not relevance.is_study_file(it.get("title")):
+                noise += 1  # a poster, handbook or form
+                continue
             try:
                 f = by_id.get(fid) or cv.file(c["id"], fid)
             except CanvasError:
                 continue  # locked or unpublished
+            if study_only and not relevance.is_study_file(f.get("display_name") or f.get("filename")):
+                noise += 1
+                continue
             out.append((f, _safe(m.get("name") or "")))
     for fid, f in by_id.items():
-        if fid not in seen:
-            path = folders.get(f.get("folder_id"), "")
-            path = re.sub(r"^course files/?", "", path)
-            out.append((f, "/".join(_safe(p) for p in path.split("/") if p)))
-    return out
+        if fid in seen:
+            continue
+        path = re.sub(r"^course files/?", "", folders.get(f.get("folder_id"), ""))
+        parts = [p for p in path.split("/") if p]
+        if study_only and not all(relevance.is_study_section(p) for p in parts):
+            continue
+        if study_only and not relevance.is_study_file(f.get("display_name") or f.get("filename"), *parts):
+            noise += 1
+            continue
+        out.append((f, "/".join(_safe(p) for p in parts)))
+    return out, noise
 
 
 def _is_pdf(f: dict) -> bool:
@@ -255,7 +324,8 @@ def _is_pdf(f: dict) -> bool:
 def _sync_course(cv: Canvas, c: dict, *, skip_existing: bool, pdfs_only: bool) -> dict:
     root = _settings.download_dir / _folder(c)
     downloaded, skipped, errors = [], 0, []
-    for f, sub in _course_files(cv, c):
+    files, noise = _course_files(cv, c, study_only=pdfs_only)
+    for f, sub in files:
         if f.get("locked_for_user") or not f.get("url") or (pdfs_only and not _is_pdf(f)):
             continue
         dest = root / sub / _safe(f.get("display_name") or f.get("filename"))
@@ -270,7 +340,7 @@ def _sync_course(cv: Canvas, c: dict, *, skip_existing: bool, pdfs_only: bool) -
         except Exception as e:  # noqa: BLE001 - report per file, keep going
             errors.append(f"{dest.name}: {e}")
     return {"course": _folder(c), "folder": str(root), "downloaded": len(downloaded), "skipped": skipped,
-            "files": downloaded, "errors": errors}
+            "not_study": noise, "files": downloaded, "errors": errors}
 
 
 # A sync of every course runs in the background (it can take a while); canvas_sync_status reports on it.
@@ -281,7 +351,7 @@ _job_lock = threading.Lock()
 def _sync_all(skip_existing: bool) -> None:
     def go(cv: Canvas):
         now = datetime.now(timezone.utc)
-        courses = [c for c in cv.courses() if _current(c, now)]
+        courses, passed = _choose([c for c in cv.courses() if _current(c, now)])
         reports = []
         for i, c in enumerate(courses, 1):
             _job["progress"] = f"Course {i} of {len(courses)}: {_folder(c)}…"
@@ -289,16 +359,20 @@ def _sync_all(skip_existing: bool) -> None:
                 reports.append(_sync_course(cv, c, skip_existing=skip_existing, pdfs_only=True))
             except CanvasError as e:  # one course failing (e.g. no access) shouldn't stop the rest
                 reports.append({"course": _folder(c), "downloaded": 0, "skipped": 0, "files": [], "errors": [str(e)]})
-        return courses, reports
+        return courses, passed, reports
     try:
-        courses, reports = _with_canvas(go)
+        courses, passed, reports = _with_canvas(go)
         new = sum(r["downloaded"] for r in reports)
+        noise = sum(r.get("not_study", 0) for r in reports)
         errors = [f"{r['course']}: {e}" for r in reports for e in r["errors"]]
         where = str(_settings.download_dir).replace(str(Path.home()), "~", 1)
         summary = (f"{new} new PDF{'s' if new != 1 else ''} from {len(courses)} course{'s' if len(courses) != 1 else ''}"
-                   f" into {where}" + (f" ({len(errors)} couldn't be downloaded)" if errors else "") + ".")
+                   f" into {where}" + (f" ({len(errors)} couldn't be downloaded)" if errors else "") + "."
+                   + (f" Skipped {len(passed)} site{'s' if len(passed) != 1 else ''} that aren't courses"
+                      f" ({', '.join(p['name'] for p in passed[:3])}{'…' if len(passed) > 3 else ''})." if passed else ""))
         _job.update(report={"summary": summary, "folder": str(_settings.download_dir), "downloaded": new,
-                            "courses": reports, "errors": errors})
+                            "courses": reports, "errors": errors, "not_study_files": noise,
+                            "skipped_courses": [{"id": p["id"], "name": p["name"], "why": p["why"]} for p in passed]})
     except LoginRequired as e:
         _job.update(report={"login_required": True, "message": str(e)})
     except Exception as e:  # noqa: BLE001 - surfaced through canvas_sync_status
@@ -319,7 +393,8 @@ async def canvas_sync(course: str = "", skip_existing: bool = True) -> dict:
     ~/CanvasFiles).
 
     With a `course` (id, code or part of the name), downloads every file in it and returns the result. Without one,
-    downloads the PDFs (lecture slides, handouts, readings) from every current course in the background and returns
+    downloads the PDFs (lecture slides, handouts, readings) from every current course in the background, skipping
+    sites that aren't courses and files that aren't for studying (posters, handbooks, forms), and returns
     {"running": true}; call canvas_sync_status until it reports the result. Files already there are skipped."""
     if course:
         def go(cv: Canvas):
