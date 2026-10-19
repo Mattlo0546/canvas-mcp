@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "canvas-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for Canvas LMS (Instructure): courses, modules, deadlines, announcements and lecture-slide download, with university SSO sign-in (Oxford by default)"
 readme = "README.md"
 license = "MIT"

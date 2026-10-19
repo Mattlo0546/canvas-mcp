@@ -187,3 +187,9 @@ def test_stdio_lists_tools_and_keeps_stdout_clean():
         assert {"canvas_sync", "canvas_sync_status", "canvas_login", "canvas_deadlines", "canvas_announcements"} <= names
     finally:
         p.kill()
+
+
+def test_login_with_a_working_session_needs_no_window():
+    _session("good")
+    res = anyio.run(server.canvas_login)
+    assert res["ok"] and res["how"] == "already signed in"

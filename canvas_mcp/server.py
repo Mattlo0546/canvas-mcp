@@ -109,9 +109,11 @@ async def canvas_login(timeout_seconds: int = 300) -> dict:
     completes SSO + MFA there and the session is saved for the other tools. Tries a silent refresh first, so it often
     finishes without any window."""
     def go():
-        if _settings.token:
+        try:  # the token or saved session still works: nothing to do
             me = Canvas(_settings).me()
-            return {"ok": True, "name": me.get("name"), "how": "access token"}
+            return {"ok": True, "name": me.get("name"), "how": "access token" if _settings.token else "already signed in"}
+        except (LoginRequired, CanvasError):
+            pass
         res = browser_login(_settings, headless=True)
         if res.get("ok"):
             return {**res, "how": "refreshed silently"}
