@@ -101,8 +101,9 @@ class Canvas:
         return self.get("users/self")
 
     def courses(self) -> list[dict]:
-        """Courses the user is actively enrolled in, with their term (for start/end dates)."""
-        return self.get_all("courses", enrollment_state="active", **{"include[]": ["term"]})
+        """Courses the user is actively enrolled in, with their term (for start/end dates) and size (to spot
+        year-group noticeboards)."""
+        return self.get_all("courses", enrollment_state="active", **{"include[]": ["term", "total_students"]})
 
     def modules(self, course_id: int) -> list[dict]:
         return self.get_all(f"courses/{course_id}/modules", **{"include[]": ["items"]})

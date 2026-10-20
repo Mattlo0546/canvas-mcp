@@ -29,6 +29,7 @@ def _body(fid):
 COURSES = [
     {"id": 21, "course_code": "PPE101", "name": "Introduction to Philosophy", "term": {"name": "MT26", "end_at": SOON}},
     {"id": 22, "course_code": "HIST2", "name": "Modern History", "term": {"name": "MT26"}},
+    {"id": 23, "course_code": "SKILLS", "name": "Study Skills Hub", "term": {"name": "MT26"}, "total_students": 9000},
     {"id": 9, "course_code": "OLD", "name": "Last year", "term": {"name": "TT25", "end_at": "2025-06-01T00:00:00Z"}},
 ]
 
@@ -61,17 +62,24 @@ class FakeCanvas(BaseHTTPRequestHandler):
             raw = json.dumps(data).encode()
             self._send(200, raw if by_token else b"while(1);" + raw, headers=headers)
 
-        files21 = [_file(101, "Lecture 1.pdf"), _file(102, "Reading.pdf", 2), _file(103, "Notes.docx", 1, "application/msword")]
+        # PPE101 also holds a poster in a module, a "Student support" module and a handbook in its Files area.
+        files21 = [_file(101, "Lecture 1.pdf"), _file(102, "Reading.pdf", 2), _file(103, "Notes.docx", 1, "application/msword"),
+                   _file(104, "image.pdf"), _file(105, "Wellbeing services.pdf"), _file(106, "Course_handbook_2026.pdf")]
         routes = {
             "/api/v1/users/self": {"id": 1, "name": "Test Student"},
             "/api/v1/courses/21/modules": [{"name": "Week 1", "items": [
                 {"type": "File", "title": "Lecture 1", "content_id": 101, "html_url": "x"},
-                {"type": "Assignment", "title": "Essay 1", "content_details": {"due_at": SOON}}]}],
+                {"type": "Assignment", "title": "Essay 1", "content_details": {"due_at": SOON}},
+                {"type": "File", "title": "Freshers' fair poster", "content_id": 104}]},
+                {"name": "Student support", "items": [{"type": "File", "title": "Wellbeing", "content_id": 105}]}],
             "/api/v1/courses/21/files": files21,
             "/api/v1/courses/21/folders": [{"id": 1, "full_name": "course files"}, {"id": 2, "full_name": "course files/Readings"}],
             "/api/v1/courses/22/modules": [{"name": "Week 1: Revolutions", "items": [{"type": "File", "content_id": 201}]}],
             "/api/v1/courses/22/files/201": _file(201, "Slides: 1789.pdf"),
             "/api/v1/courses/21/files/101": files21[0],
+            "/api/v1/courses/23/modules": [{"name": "Writing", "items": [{"type": "File", "content_id": 301}]}],
+            "/api/v1/courses/23/files": [_file(301, "Essay writing.pdf")],
+            "/api/v1/courses/23/folders": [{"id": 1, "full_name": "course files"}],
             "/api/v1/planner/items": [{"plannable_type": "assignment", "context_name": "PPE101", "html_url": "/courses/21/assignments/5",
                                        "plannable": {"title": "Essay 1", "due_at": SOON}, "submissions": {"submitted": False}}],
             "/api/v1/announcements": [{"title": "Room change", "context_code": "course_21", "posted_at": SOON,
@@ -124,7 +132,7 @@ def test_downloads_go_to_slidemate_library():
 def test_courses_follow_pagination_and_skip_past_terms():
     _session("good")
     names = [c["code"] for c in anyio.run(server.canvas_courses)]
-    assert names == ["PPE101", "HIST2"]
+    assert names == ["PPE101", "HIST2", "SKILLS"]
 
 
 def test_sync_every_current_course_pdfs_only():
@@ -135,7 +143,34 @@ def test_sync_every_current_course_pdfs_only():
     # students, so its module file is fetched by id. The past course is skipped.
     assert files == ["HIST2/Week 1- Revolutions/Slides- 1789.pdf", "PPE101/Readings/Reading.pdf", "PPE101/Week 1/Lecture 1.pdf"]
     assert rep["downloaded"] == 3 and "2 courses" in rep["summary"] and not rep["errors"]
+    assert rep["skipped_courses"] == [{"id": 23, "name": "Study Skills Hub", "why": rep["skipped_courses"][0]["why"]}]
+    assert "Study Skills Hub" in rep["summary"]
+    assert rep["not_study_files"] == 2  # the poster and the handbook (the support module isn't looked at)
     assert _sync_all()["downloaded"] == 0  # a second run skips what's there
+
+
+def test_student_can_bring_back_a_skipped_course():
+    _session("good")
+    anyio.run(server.canvas_set_courses, ["Study Skills"], None)
+    listed = {c["id"]: c for c in anyio.run(server.canvas_courses, True)}
+    assert listed[23]["synced"] and not listed[9]["synced"]
+    rep = _sync_all()
+    assert (LIBRARY / "SKILLS" / "Writing" / "Essay writing.pdf").exists() and not rep["skipped_courses"]
+    anyio.run(server.canvas_set_courses, None, ["23", "HIST2"])
+    listed = {c["id"]: c for c in anyio.run(server.canvas_courses)}
+    assert not listed[23]["synced"] and listed[22]["why_not"] == "you turned it off"
+    anyio.run(server.canvas_set_courses, ["HIST2"], None)
+    assert {c["id"]: c for c in anyio.run(server.canvas_courses)}[22]["synced"]
+
+
+def test_relevance_keeps_lectures_whose_topic_sounds_like_admin():
+    from canvas_mcp import relevance as r
+    assert r.is_study_file("Lecture 3 - Mathematical induction.pdf") and r.is_study_file("Consent in medical ethics.pdf")
+    assert r.is_study_file("Privacy and the state.pdf") and r.is_study_file("Survey methods L4.pdf")
+    assert not r.is_study_file("Induction week schedule.pdf") and not r.is_study_file("Privacy notice.pdf")
+    assert not r.is_study_file("Extension_request_form.pdf") and not r.is_study_file("x.pdf", "Course handbook 2026")
+    assert r.course_skip_reason("Community Ecology", "BIOL20003") == ""
+    assert r.course_skip_reason("First Year Noticeboard", "", "", 2500) != ""
 
 
 def test_one_course_gets_every_file():
@@ -184,7 +219,7 @@ def test_stdio_lists_tools_and_keeps_stdout_clean():
                               "clientInfo": {"name": "test", "version": "0"}})
         p.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
         names = {t["name"] for t in rpc(2, "tools/list")["result"]["tools"]}
-        assert {"canvas_sync", "canvas_sync_status", "canvas_login", "canvas_deadlines", "canvas_announcements"} <= names
+        assert {"canvas_sync", "canvas_sync_status", "canvas_set_courses", "canvas_login", "canvas_deadlines", "canvas_announcements"} <= names
     finally:
         p.kill()
 
